@@ -7,7 +7,7 @@ class OfflineLlamaModel {
         init {
             try {
                 System.loadLibrary("llama_jni")
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e("OfflineLlamaModel", "Failed to load llama_jni library", e)
             }
         }

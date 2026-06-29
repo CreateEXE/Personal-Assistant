@@ -92,7 +92,7 @@ class AssistantViewModel : ViewModel() {
                 
                 val llamaResponse = try {
                     jsonAdapter.fromJson(responseJson)
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     null
                 }
 
@@ -107,7 +107,7 @@ class AssistantViewModel : ViewModel() {
                     _messages.value = _messages.value + ChatMessage("Error parsing JSON response: $responseJson", false)
                 }
                 
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 _messages.value = _messages.value + ChatMessage("Error during generation: ${e.message}", false)
             } finally {
                 _isLoading.value = false
@@ -170,7 +170,7 @@ class MainActivity : ComponentActivity() {
             Manifest.permission.READ_CALENDAR,
             Manifest.permission.WRITE_CALENDAR,
             Manifest.permission.POST_NOTIFICATIONS,
-            Manifest.permission.SCHEDULE_EXACT_ALARM
+            Manifest.permission.RECORD_AUDIO
         )
         
         val missingPerms = perms.filter {
@@ -235,30 +235,59 @@ class MainActivity : ComponentActivity() {
 }
 
 enum class ViewMode {
-    ASSISTANT, TODAY, WEEK, MONTH, SETTINGS
+    SPLASH, ASSISTANT, TODAY, WEEK, MONTH, SETTINGS
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
-    viewModel: AssistantViewModel = viewModel(),
+    viewModel: AssistantViewModel = androidx.lifecycle.viewmodel.compose.viewModel(),
     settingsManager: SettingsManager,
     sttManager: SpeechToTextManager,
     ttsManager: TextToSpeechManager,
     onAction: (LlamaAction) -> Unit
 ) {
-    var currentView by remember { mutableStateOf(ViewMode.ASSISTANT) }
+    var currentView by remember { mutableStateOf(ViewMode.SPLASH) }
     
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(settingsManager.assistantName) },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(2000)
+        currentView = ViewMode.ASSISTANT
+    }
+    
+    if (currentView == ViewMode.SPLASH) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = "App Logo",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(80.dp)
                 )
-            )
-        },
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = settingsManager.assistantName,
+                    style = MaterialTheme.typography.headlineLarge,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                )
+            }
+        }
+    } else {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(settingsManager.assistantName) },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                )
+            },
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
@@ -301,8 +330,10 @@ fun MainScreen(
                 ViewMode.WEEK -> CalendarViewScreen(mode = ViewMode.WEEK)
                 ViewMode.MONTH -> CalendarViewScreen(mode = ViewMode.MONTH)
                 ViewMode.SETTINGS -> SettingsScreen(settingsManager, sttManager, ttsManager)
+                else -> {}
             }
         }
+    }
     }
 }
 

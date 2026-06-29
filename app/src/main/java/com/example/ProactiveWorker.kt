@@ -65,7 +65,7 @@ class ProactiveWorker(
             if (proactiveResponse?.should_notify == true) {
                 showProactiveNotification(proactiveResponse.message)
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e("ProactiveWorker", "Error evaluating proactive prompt", e)
             return Result.failure()
         }
