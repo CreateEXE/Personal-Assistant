@@ -1,0 +1,6 @@
+{
+  "name": "Local Assistant",
+  "description": "An offline personal assistant app using local llama.cpp inference.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
