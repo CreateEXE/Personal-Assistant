@@ -228,6 +228,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        
         sttManager.destroy()
         ttsManager.shutdown()
     }
