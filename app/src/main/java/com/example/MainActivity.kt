@@ -9,6 +9,7 @@ import android.provider.CalendarContract
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -22,7 +23,6 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -69,9 +69,10 @@ class AssistantViewModel : ViewModel() {
         .build()
     private val jsonAdapter = moshi.adapter(LlamaResponse::class.java)
 
-    fun initModel() {
+    fun initModel(settingsManager: SettingsManager) {
+        val modelPath = settingsManager.modelPath.takeIf { it.isNotEmpty() } ?: "/data/local/tmp/model.gguf"
         try {
-            llamaModel.loadModel("/data/local/tmp/model.gguf")
+            llamaModel.loadModel(modelPath)
         } catch (e: UnsatisfiedLinkError) {
             _messages.value = _messages.value + ChatMessage("Error: Could not load JNI bridge.", false)
         }
@@ -308,59 +309,135 @@ fun MainScreen(
 fun SettingsScreen(settingsManager: SettingsManager, sttManager: SpeechToTextManager, ttsManager: TextToSpeechManager) {
     var name by remember { mutableStateOf(settingsManager.assistantName) }
     var personality by remember { mutableStateOf(settingsManager.personality) }
+    var modelPath by remember { mutableStateOf(settingsManager.modelPath) }
+    var isCopying by remember { mutableStateOf(false) }
+    
     val context = LocalContext.current
-
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Preferences", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(24.dp))
-        
-        OutlinedTextField(
-            value = name,
-            onValueChange = { name = it; settingsManager.assistantName = it },
-            label = { Text("Assistant Name") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        OutlinedTextField(
-            value = personality,
-            onValueChange = { personality = it; settingsManager.personality = it },
-            label = { Text("System Personality Prompt") },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 4,
-            maxLines = 8
-        )
-        Spacer(modifier = Modifier.height(32.dp))
-        
-        Text("Engine Status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(8.dp))
-        Text("Text-to-Speech (TTS): ${if (ttsManager.isInitialized) "Online" else "Offline"}")
-        Text("Speech-to-Text (STT): ${if (sttManager.isInitialized) "Online" else "Offline"}")
-        
-        Spacer(modifier = Modifier.height(32.dp))
-        
-        Button(
-            onClick = {
+    val scope = rememberCoroutineScope()
+    
+    val modelPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            isCopying = true
+            scope.launch(Dispatchers.IO) {
                 try {
-                    val intent = Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
-                    context.startActivity(intent)
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                    val targetFile = java.io.File(context.filesDir, "model.gguf")
+                    val outputStream = java.io.FileOutputStream(targetFile)
+                    inputStream?.use { input ->
+                        outputStream.use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    val newPath = targetFile.absolutePath
+                    withContext(Dispatchers.Main) {
+                        modelPath = newPath
+                        settingsManager.modelPath = newPath
+                        isCopying = false
+                        Toast.makeText(context, "Model updated successfully. Please restart app.", Toast.LENGTH_LONG).show()
+                    }
                 } catch (e: Exception) {
-                    Toast.makeText(context, "Could not open OS Voice settings", Toast.LENGTH_SHORT).show()
+                    withContext(Dispatchers.Main) {
+                        isCopying = false
+                        Toast.makeText(context, "Failed to load model: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
                 }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-        ) {
-            Text("Set as Default System Assistant")
+            }
+        }
+    }
+
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        item { Text("Preferences", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
+        item { Spacer(modifier = Modifier.height(24.dp)) }
+        
+        item { 
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it; settingsManager.assistantName = it },
+                label = { Text("Assistant Name") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+        }
+        item { Spacer(modifier = Modifier.height(16.dp)) }
+        
+        item {
+            OutlinedTextField(
+                value = personality,
+                onValueChange = { personality = it; settingsManager.personality = it },
+                label = { Text("System Personality Prompt") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 4,
+                maxLines = 8
+            )
+        }
+        item { Spacer(modifier = Modifier.height(32.dp)) }
+
+        item {
+            Text("AI Model", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        }
+        item { Spacer(modifier = Modifier.height(8.dp)) }
+        item {
+            Text("Current Model Path:\n${modelPath.ifEmpty { "None (Using default stub)" }}", style = MaterialTheme.typography.bodySmall)
+        }
+        item { Spacer(modifier = Modifier.height(8.dp)) }
+        item {
+            Button(
+                onClick = { modelPickerLauncher.launch("*/*") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isCopying
+            ) {
+                Text(if (isCopying) "Copying model..." else "Load Custom .gguf Model")
+            }
+        }
+        if (isCopying) {
+            item { 
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) 
+            }
         }
         
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "Requires navigating to Default digital assistant app in Android settings.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        item { Spacer(modifier = Modifier.height(32.dp)) }
+        
+        item {
+            Text("Engine Status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        }
+        item { Spacer(modifier = Modifier.height(8.dp)) }
+        item {
+            Text("Text-to-Speech (TTS): ${if (ttsManager.isInitialized) "Online" else "Offline"}")
+        }
+        item {
+            Text("Speech-to-Text (STT): ${if (sttManager.isInitialized) "Online" else "Offline"}")
+        }
+        
+        item { Spacer(modifier = Modifier.height(32.dp)) }
+        
+        item {
+            Button(
+                onClick = {
+                    try {
+                        val intent = Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Could not open OS Voice settings", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+            ) {
+                Text("Set as Default System Assistant")
+            }
+        }
+        
+        item { Spacer(modifier = Modifier.height(8.dp)) }
+        item {
+            Text(
+                text = "Requires navigating to Default digital assistant app in Android settings.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -385,7 +462,7 @@ fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsMana
     }
     
     LaunchedEffect(Unit) {
-        viewModel.initModel()
+        viewModel.initModel(settingsManager)
         todaySchedule = calendarHelper.getTodaySchedule()
     }
     
@@ -432,7 +509,7 @@ fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsMana
                 if (isListening) sttManager.stopListening() else sttManager.startListening()
             }) {
                 Icon(
-                    imageVector = Icons.Default.Mic,
+                    imageVector = Icons.Default.Notifications,
                     contentDescription = "Microphone",
                     tint = if (isListening) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                 )

@@ -13,4 +13,8 @@ class SettingsManager(context: Context) {
     var personality: String
         get() = prefs.getString("personality", "You are an autonomous, offline assistant for Alexander. You are concise, highly capable, and respond strictly in JSON.") ?: "You are an autonomous, offline assistant for Alexander. You are concise, highly capable, and respond strictly in JSON."
         set(value) = prefs.edit().putString("personality", value).apply()
+        
+    var modelPath: String
+        get() = prefs.getString("model_path", "") ?: ""
+        set(value) = prefs.edit().putString("model_path", value).apply()
 }

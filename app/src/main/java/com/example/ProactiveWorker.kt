@@ -51,7 +51,8 @@ class ProactiveWorker(
         
         val llamaModel = OfflineLlamaModel()
         try {
-            llamaModel.loadModel("/data/local/tmp/model.gguf") // Stub path
+            val modelPath = settingsManager.modelPath.takeIf { it.isNotEmpty() } ?: "/data/local/tmp/model.gguf"
+            llamaModel.loadModel(modelPath)
             val responseJson = llamaModel.generateText(prompt)
             
             val moshi = Moshi.Builder()
