@@ -23,8 +23,11 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.animation.core.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -88,7 +91,10 @@ fun extractResponseText(json: String): String {
     return "Analyzing request..."
 }
 
-class AssistantViewModel(private val repository: com.example.data.ChatRepository) : ViewModel() {
+class AssistantViewModel(
+    private val repository: com.example.data.ChatRepository,
+    private val hapticManager: HapticManager
+) : ViewModel() {
     val messages: StateFlow<List<com.example.data.ChatMessageEntity>> = repository.allMessages.stateIn(
         scope = viewModelScope,
         started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
@@ -101,6 +107,15 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
     private val _streamingMessage = MutableStateFlow("")
     val streamingMessage = _streamingMessage.asStateFlow()
 
+    private val _isGenerating = MutableStateFlow(false)
+    val isGenerating = _isGenerating.asStateFlow()
+
+    private val _currentSystemPrompt = MutableStateFlow(Persona.CONCISE_ASSISTANT.systemPrompt)
+    val currentSystemPrompt = _currentSystemPrompt.asStateFlow()
+
+    // Slide-Window History using ArrayDeque (limiting to last 10 exchanges = 20 messages)
+    private val historyBuffer = ArrayDeque<com.example.data.ChatMessageEntity>()
+
     private val llamaModel = OfflineLlamaModel()
     
     private val moshi = Moshi.Builder()
@@ -110,6 +125,12 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
 
     fun initModel(settingsManager: SettingsManager) {
         val modelPath = settingsManager.modelPath.takeIf { it.isNotEmpty() } ?: "/data/local/tmp/model.gguf"
+        
+        // Load the stored selected persona
+        val selectedPersonaName = settingsManager.selectedPersona
+        val matchedPersona = Persona.DEFAULT_PERSONAS.find { it.name == selectedPersonaName } ?: Persona.CONCISE_ASSISTANT
+        _currentSystemPrompt.value = matchedPersona.systemPrompt
+
         try {
             llamaModel.loadModel(modelPath)
         } catch (e: UnsatisfiedLinkError) {
@@ -117,8 +138,30 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
         }
     }
 
-    fun sendMessage(userText: String, calendarContext: String, environmentContext: String, settingsManager: SettingsManager, ttsManager: TextToSpeechManager, onAction: (LlamaAction) -> Unit) {
-        val personality = settingsManager.personality
+    fun selectPersona(persona: Persona, settingsManager: SettingsManager) {
+        _currentSystemPrompt.value = persona.systemPrompt
+        settingsManager.selectedPersona = persona.name
+    }
+
+    fun pruneHistory() {
+        // Keep only the last 10 exchanges (each exchange is 1 User + 1 Assistant, total of 20 messages)
+        while (historyBuffer.size > 20) {
+            historyBuffer.removeFirst()
+        }
+    }
+
+    fun sendMessage(
+        userText: String, 
+        calendarContext: String, 
+        environmentContext: String, 
+        settingsManager: SettingsManager, 
+        ttsManager: TextToSpeechManager, 
+        onAction: (LlamaAction) -> Unit
+    ) {
+        // Trigger haptic light tap feedback on send click
+        hapticManager.triggerLightTap()
+
+        val personality = _currentSystemPrompt.value
         
         // Sentiment Mapping
         val lowerText = userText.lowercase()
@@ -145,12 +188,27 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
             CRITICAL: Do NOT output confirmation of an action in "response_text" unless the action is confirmed successful by the backend.
         """.trimIndent()
         
-        val prompt = "System: $personality\n\n$schemaFormat\n\n$sentimentTag\nModify tone and thought_process based on sentiment tag.\n$calendarContext\n$environmentContext\n\nUser: $userText\nAssistant:"
+        // Build the history string from the sliding window
+        val historyPrompt = if (historyBuffer.isNotEmpty()) {
+            historyBuffer.joinToString("\n") { msg ->
+                if (msg.isUser) "User: ${msg.text}" else "Assistant: ${msg.text}"
+            } + "\n"
+        } else {
+            ""
+        }
+
+        val prompt = "System: $personality\n\n$schemaFormat\n\n$sentimentTag\nModify tone and thought_process based on sentiment tag.\n$calendarContext\n$environmentContext\n\n${historyPrompt}User: $userText\nAssistant:"
         
         viewModelScope.launch {
             repository.insertMessage(userText, true)
+            
+            // Add to sliding history and prune
+            historyBuffer.addLast(com.example.data.ChatMessageEntity(text = userText, isUser = true))
+            pruneHistory()
+
             _status.value = ModelStatus.Loading
             _streamingMessage.value = ""
+            _isGenerating.value = true
 
             try {
                 withContext(Dispatchers.IO) {
@@ -179,13 +237,30 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
                             }
                         }
 
+                        // Trigger haptic success feedback if actions were triggered
+                        if (actionsToExecute.isNotEmpty()) {
+                            withContext(Dispatchers.Main) {
+                                hapticManager.triggerSuccess()
+                            }
+                        }
+
                         // Save and speak actual response text
                         repository.insertMessage(llamaResponse.response_text, false)
+                        
+                        // Add response to history buffer and prune
+                        historyBuffer.addLast(com.example.data.ChatMessageEntity(text = llamaResponse.response_text, isUser = false))
+                        pruneHistory()
+
                         ttsManager.speak(llamaResponse.response_text)
                     } else {
                         val extractedText = extractResponseText(fullResponse)
                         if (extractedText.isNotEmpty() && extractedText != "Analyzing request...") {
                             repository.insertMessage(extractedText, false)
+                            
+                            // Add response to history buffer and prune
+                            historyBuffer.addLast(com.example.data.ChatMessageEntity(text = extractedText, isUser = false))
+                            pruneHistory()
+
                             ttsManager.speak(extractedText)
                         } else {
                             repository.insertMessage("Error parsing JSON response: $fullResponse", false)
@@ -195,9 +270,15 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
             } catch (e: Throwable) {
                 _status.value = ModelStatus.Error(e.message ?: "Unknown error")
                 repository.insertMessage("Error during generation: ${e.message}", false)
+                
+                // Trigger heavy buzz error feedback
+                withContext(Dispatchers.Main) {
+                    hapticManager.triggerError()
+                }
             } finally {
                 _streamingMessage.value = ""
                 _status.value = ModelStatus.Idle
+                _isGenerating.value = false
             }
         }
     }
@@ -365,8 +446,9 @@ fun MainScreen(
 ) {
     val context = LocalContext.current
     val myApplication = context.applicationContext as MyApplication
+    val hapticManager = remember { HapticManager(context) }
     val viewModel: AssistantViewModel = androidx.lifecycle.viewmodel.compose.viewModel(
-        factory = AssistantViewModelFactory(myApplication.chatRepository)
+        factory = AssistantViewModelFactory(myApplication.chatRepository, hapticManager)
     )
     var currentView by remember { mutableStateOf(ViewMode.SPLASH) }
     
@@ -482,7 +564,7 @@ fun MainScreen(
                 ViewMode.TODAY -> CalendarViewScreen(mode = ViewMode.TODAY)
                 ViewMode.WEEK -> CalendarViewScreen(mode = ViewMode.WEEK)
                 ViewMode.MONTH -> CalendarViewScreen(mode = ViewMode.MONTH)
-                ViewMode.SETTINGS -> SettingsScreen(settingsManager, sttManager, ttsManager, sensorManager)
+                ViewMode.SETTINGS -> SettingsScreen(settingsManager, sttManager, ttsManager, sensorManager, viewModel)
                 else -> {}
             }
         }
@@ -491,7 +573,13 @@ fun MainScreen(
 }
 
 @Composable
-fun SettingsScreen(settingsManager: SettingsManager, sttManager: SpeechToTextManager, ttsManager: TextToSpeechManager, sensorManager: EnvironmentSensorManager) {
+fun SettingsScreen(
+    settingsManager: SettingsManager, 
+    sttManager: SpeechToTextManager, 
+    ttsManager: TextToSpeechManager, 
+    sensorManager: EnvironmentSensorManager,
+    viewModel: AssistantViewModel
+) {
     var name by remember { mutableStateOf(settingsManager.assistantName) }
     var personality by remember { mutableStateOf(settingsManager.personality) }
     var modelPath by remember { mutableStateOf(settingsManager.modelPath) }
@@ -546,6 +634,64 @@ fun SettingsScreen(settingsManager: SettingsManager, sttManager: SpeechToTextMan
             )
         }
         item { Spacer(modifier = Modifier.height(16.dp)) }
+
+        item {
+            Text("Companion Persona", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        item {
+            var selectedPersonaName by remember { mutableStateOf(settingsManager.selectedPersona) }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Persona.DEFAULT_PERSONAS.forEach { persona ->
+                    val isSelected = persona.name == selectedPersonaName
+                    OutlinedCard(
+                        onClick = {
+                            selectedPersonaName = persona.name
+                            viewModel.selectPersona(persona, settingsManager)
+                            personality = persona.systemPrompt
+                            Toast.makeText(context, "${persona.name} persona applied instantly!", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = CardDefaults.outlinedCardColors(
+                            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+                        ),
+                        border = BorderStroke(
+                            width = if (isSelected) 2.dp else 1.dp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = persona.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = persona.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Selected",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(start = 8.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item { Spacer(modifier = Modifier.height(24.dp)) }
         
         item {
             OutlinedTextField(
@@ -701,6 +847,58 @@ fun SettingsScreen(settingsManager: SettingsManager, sttManager: SpeechToTextMan
 }
 
 @Composable
+fun TypingIndicator() {
+    val infiniteTransition = rememberInfiniteTransition(label = "typing")
+    val alpha1 by infiniteTransition.animateFloat(
+        initialValue = 0.2f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "alpha1"
+    )
+    val alpha2 by infiniteTransition.animateFloat(
+        initialValue = 0.2f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, delayMillis = 200, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "alpha2"
+    )
+    val alpha3 by infiniteTransition.animateFloat(
+        initialValue = 0.2f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, delayMillis = 400, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "alpha3"
+    )
+
+    Row(
+        modifier = Modifier
+            .padding(8.dp)
+            .background(MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(12.dp))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "Fait is typing",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.padding(end = 8.dp)
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box(modifier = Modifier.size(6.dp).background(MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = alpha1), shape = RoundedCornerShape(50)))
+            Box(modifier = Modifier.size(6.dp).background(MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = alpha2), shape = RoundedCornerShape(50)))
+            Box(modifier = Modifier.size(6.dp).background(MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = alpha3), shape = RoundedCornerShape(50)))
+        }
+    }
+}
+
+@Composable
 fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsManager, sttManager: SpeechToTextManager, ttsManager: TextToSpeechManager, sensorManager: EnvironmentSensorManager, knowledgeIndexer: KnowledgeIndexer, onAction: (LlamaAction) -> Unit) {
     val context = LocalContext.current
     val calendarHelper = remember { CalendarHelper(context) }
@@ -709,6 +907,7 @@ fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsMana
     val messages by viewModel.messages.collectAsState()
     val status by viewModel.status.collectAsState()
     val streamingMessage by viewModel.streamingMessage.collectAsState()
+    val isGenerating by viewModel.isGenerating.collectAsState()
     val isListening by sttManager.isListening.collectAsState()
     val spokenText by sttManager.spokenText.collectAsState()
     
@@ -754,9 +953,9 @@ fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsMana
             items(messages) { message ->
                 ChatBubble(message = message)
             }
-            if (status == ModelStatus.Loading) {
+            if (status == ModelStatus.Loading || (isGenerating && streamingMessage.isEmpty())) {
                 item {
-                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                    TypingIndicator()
                 }
             } else if (status == ModelStatus.Generating && streamingMessage.isNotEmpty()) {
                 item {

@@ -40,4 +40,13 @@ class ExampleUnitTest {
     val result = extractResponseText(text)
     assertEquals("Error: model could not load correctly", result)
   }
+
+  @Test
+  fun persona_containsDefaultPersonas() {
+    val personas = Persona.DEFAULT_PERSONAS
+    assertEquals(3, personas.size)
+    assertNotNull(personas.find { it.name == "Concise Assistant" })
+    assertNotNull(personas.find { it.name == "Creative Writer" })
+    assertNotNull(personas.find { it.name == "Technical Debugger" })
+  }
 }

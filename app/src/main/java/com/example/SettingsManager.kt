@@ -19,6 +19,7 @@ class SettingsManager(private val context: Context) {
         val SENSOR_POLLING = booleanPreferencesKey("sensor_polling")
         val FILE_INDEXING_PATH = stringPreferencesKey("file_indexing_path")
         val LOW_POWER_MODE = booleanPreferencesKey("low_power_mode")
+        val SELECTED_PERSONA = stringPreferencesKey("selected_persona")
     }
 
     val assistantNameFlow: Flow<String> = context.dataStore.data.map { preferences ->
@@ -43,6 +44,10 @@ class SettingsManager(private val context: Context) {
 
     val lowPowerModeFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
         preferences[LOW_POWER_MODE] ?: false
+    }
+
+    val selectedPersonaFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[SELECTED_PERSONA] ?: "Concise Assistant"
     }
 
     // Synchronous compatibility properties using runBlocking
@@ -91,6 +96,14 @@ class SettingsManager(private val context: Context) {
         set(value) = runBlocking {
             context.dataStore.edit { preferences ->
                 preferences[LOW_POWER_MODE] = value
+            }
+        }
+
+    var selectedPersona: String
+        get() = runBlocking { selectedPersonaFlow.first() }
+        set(value) = runBlocking {
+            context.dataStore.edit { preferences ->
+                preferences[SELECTED_PERSONA] = value
             }
         }
 }
