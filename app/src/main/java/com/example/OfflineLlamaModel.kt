@@ -8,9 +8,9 @@ import kotlinx.coroutines.flow.callbackFlow
 import java.util.regex.Pattern
 
 interface LlamaCallback {
-    fun onTokenGenerated(token: String)
+    fun onTokenGenerated(token: String?)
     fun onComplete()
-    fun onError(error: String)
+    fun onError(error: String?)
 }
 
 class OfflineLlamaModel {
@@ -49,16 +49,52 @@ class OfflineLlamaModel {
     }
 
     fun generateTextStreaming(prompt: String): Flow<String> = callbackFlow {
-        val fullResponse = generateMockResponse(prompt)
-        
-        // Stream the response word-by-word with a tiny delay
-        // to mimic a local high-performance LLM rendering.
-        val words = fullResponse.split(Regex("(?<=\\s)|(?=\\s)"))
-        for (word in words) {
-            trySend(word)
-            delay(8) 
+        if (isLibLoaded) {
+            try {
+                generateTextStreamNative(prompt, object : LlamaCallback {
+                    override fun onTokenGenerated(token: String?) {
+                        if (token != null) {
+                            trySend(token)
+                        }
+                    }
+
+                    override fun onComplete() {
+                        close()
+                    }
+
+                    override fun onError(error: String?) {
+                        val errMsg = error ?: "Unknown JNI error"
+                        Log.e("OfflineLlamaModel", "JNI Stream Error: $errMsg")
+                        
+                        // Fallback to local mock generation on JNI error
+                        val fullResponse = generateMockResponse(prompt)
+                        val words = fullResponse.split(Regex("(?<=\\s)|(?=\\s)"))
+                        for (word in words) {
+                            trySend(word)
+                        }
+                        close()
+                    }
+                })
+            } catch (e: Throwable) {
+                Log.e("OfflineLlamaModel", "Error invoking native stream generator", e)
+                // Fallback to local mock generation on execution exception
+                val fullResponse = generateMockResponse(prompt)
+                val words = fullResponse.split(Regex("(?<=\\s)|(?=\\s)"))
+                for (word in words) {
+                    trySend(word)
+                }
+                close()
+            }
+        } else {
+            // Standard simulated delay for local mockup
+            val fullResponse = generateMockResponse(prompt)
+            val words = fullResponse.split(Regex("(?<=\\s)|(?=\\s)"))
+            for (word in words) {
+                trySend(word)
+                delay(8)
+            }
+            close()
         }
-        close()
         awaitClose { }
     }
 
