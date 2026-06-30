@@ -88,8 +88,6 @@ class EnvironmentSensorManager(private val context: Context) : SensorEventListen
         return """
             [ENVIRONMENT CONTEXT]
             Battery Level: ${getBatteryLevel()}%
-            Ambient Light: ${_ambientLight.value} lx
-            Accelerometer: x=${_accelerometerData.value.first}, y=${_accelerometerData.value.second}, z=${_accelerometerData.value.third}
         """.trimIndent()
     }
 

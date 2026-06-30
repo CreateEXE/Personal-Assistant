@@ -14,20 +14,18 @@ class ExampleUnitTest {
     val json = """
       {
         "thought_process": "Preparing response...",
-        "execute_action": null,
-        "response_text": "Hello Alexander, I am ready."
+        "response_text": "Hello Snow, I am ready."
       }
     """.trimIndent()
     val result = extractResponseText(json)
-    assertEquals("Hello Alexander, I am ready.", result)
+    assertEquals("Hello Snow, I am ready.", result)
   }
 
   @Test
   fun extractResponseText_noResponseText_fallbackToThought() {
     val json = """
       {
-        "thought_process": "Working on finding the solution...",
-        "execute_action": null
+        "thought_process": "Working on finding the solution..."
       }
     """.trimIndent()
     val result = extractResponseText(json)

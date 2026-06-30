@@ -16,35 +16,11 @@ data class CalendarEvent(
 
 class CalendarHelper(private val context: Context) {
     fun getTodaySchedule(): String {
-        val calendar = Calendar.getInstance()
-        val startOfDay = calendar.apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }.timeInMillis
-
-        val endOfDay = calendar.apply {
-            set(Calendar.HOUR_OF_DAY, 23)
-            set(Calendar.MINUTE, 59)
-            set(Calendar.SECOND, 59)
-            set(Calendar.MILLISECOND, 999)
-        }.timeInMillis
-        
-        val events = getEventsBetween(startOfDay, endOfDay)
-        var scheduleText = "Today's Schedule (${SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())}):\n"
-        
-        if (events.isEmpty()) {
-            scheduleText += "- No events scheduled for today.\n"
-        } else {
-            val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
-            events.forEach { event ->
-                val startTimeStr = timeFormat.format(Date(event.startTime))
-                val endTimeStr = timeFormat.format(Date(event.endTime))
-                scheduleText += "- $startTimeStr to $endTimeStr: ${event.title}\n"
-            }
-        }
-        return scheduleText
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        val currentDate = dateFormat.format(Date())
+        val currentTime = timeFormat.format(Date())
+        return "[DATETIME CONTEXT]\nDate: $currentDate\nTime: $currentTime"
     }
 
     fun getEventsBetween(startMillis: Long, endMillis: Long): List<CalendarEvent> {
