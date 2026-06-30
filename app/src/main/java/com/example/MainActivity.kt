@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import android.widget.Toast
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -94,6 +95,8 @@ fun extractResponseText(json: String?): String {
     return "Analyzing request..."
 }
 
+typealias ChatMessage = com.example.data.ChatMessageEntity
+
 class AssistantViewModel(
     private val repository: com.example.data.ChatRepository,
     private val hapticManager: HapticManager
@@ -153,16 +156,43 @@ class AssistantViewModel(
         }
     }
 
+    private fun getSafeContext(history: List<ChatMessage>): List<ChatMessage> {
+        val systemPromptMessage = com.example.data.ChatMessageEntity(
+            text = "System: ${_currentSystemPrompt.value}",
+            isUser = false
+        )
+        // Truncate to the most recent 6 exchanges (12 total messages)
+        val truncatedHistory = history.takeLast(12)
+        // Ensure System Prompt is always prepended to start of this list
+        return listOf(systemPromptMessage) + truncatedHistory
+    }
+
     fun sendMessage(
         userText: String, 
         calendarContext: String, 
         environmentContext: String, 
         settingsManager: SettingsManager, 
         ttsManager: TextToSpeechManager, 
+        context: android.content.Context,
         onAction: (LlamaAction) -> Unit
     ) {
         // Trigger haptic light tap feedback on send click
         hapticManager.triggerLightTap()
+
+        // Handle specific "reset" command
+        if (userText.trim().equals("reset", ignoreCase = true)) {
+            historyBuffer.clear()
+            llamaModel.clearContext()
+            viewModelScope.launch {
+                repository.insertMessage(userText, true)
+                val responseText = "System context and memory buffer have been reset."
+                repository.insertMessage(responseText, false)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "System context has been reset.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            return
+        }
 
         val personality = _currentSystemPrompt.value
         
@@ -191,16 +221,20 @@ class AssistantViewModel(
             CRITICAL: Do NOT output confirmation of an action in "response_text" unless the action is confirmed successful by the backend.
         """.trimIndent()
         
-        // Build the history string from the sliding window
-        val historyPrompt = if (historyBuffer.isNotEmpty()) {
-            historyBuffer.joinToString("\n") { msg ->
+        // Truncate sliding window history to most recent 6 exchanges (12 messages) using getSafeContext
+        val safeContext = getSafeContext(historyBuffer.toList())
+        val systemMsg = safeContext.firstOrNull()?.text ?: "System: $personality"
+        val historyMsgList = safeContext.drop(1)
+
+        val historyPrompt = if (historyMsgList.isNotEmpty()) {
+            historyMsgList.joinToString("\n") { msg ->
                 if (msg.isUser) "User: ${msg.text}" else "Assistant: ${msg.text}"
             } + "\n"
         } else {
             ""
         }
 
-        val prompt = "System: $personality\n\n$schemaFormat\n\n$sentimentTag\nModify tone and thought_process based on sentiment tag.\n$calendarContext\n$environmentContext\n\n${historyPrompt}User: $userText\nAssistant:"
+        val prompt = "$systemMsg\n\n$schemaFormat\n\n$sentimentTag\nModify tone and thought_process based on sentiment tag.\n$calendarContext\n$environmentContext\n\n${historyPrompt}User: $userText\nAssistant:"
         
         viewModelScope.launch {
             repository.insertMessage(userText, true)
@@ -226,11 +260,17 @@ class AssistantViewModel(
                     
                     val llamaResponse = try {
                         if (fullResponse.isNotEmpty()) {
-                            jsonAdapter.fromJson(fullResponse)
+                            val parsed = jsonAdapter.fromJson(fullResponse)
+                            if (parsed != null && !parsed.response_text.isNullOrBlank()) {
+                                parsed
+                            } else {
+                                null
+                            }
                         } else {
                             null
                         }
                     } catch (e: Throwable) {
+                        Log.e("AssistantViewModel", "Gibberish or invalid JSON output from LLM: $fullResponse", e)
                         null
                     }
 
@@ -255,8 +295,7 @@ class AssistantViewModel(
                             }
                         }
 
-                        val responseText = llamaResponse.response_text.takeIf { !it.isNullOrBlank() } 
-                            ?: "I processed your request, but did not generate any text response."
+                        val responseText = llamaResponse.response_text!!
 
                         // Save and speak actual response text
                         repository.insertMessage(responseText, false)
@@ -267,17 +306,15 @@ class AssistantViewModel(
 
                         ttsManager.speak(responseText)
                     } else {
-                        val extractedText = extractResponseText(fullResponse)
-                        val safeText = extractedText.takeIf { !it.isNullOrBlank() && it != "Analyzing request..." } 
-                            ?: "Error parsing JSON response: ${fullResponse.takeIf { it.isNotEmpty() } ?: "Empty model response"}"
-                        
-                        repository.insertMessage(safeText, false)
-                        
-                        // Add response to history buffer and prune
-                        historyBuffer.addLast(com.example.data.ChatMessageEntity(text = safeText, isUser = false))
-                        pruneHistory()
-
-                        ttsManager.speak(safeText)
+                        // Safe-Mode Robust JSON Parsing failure (e.g. gibberish or corrupt JSON detected)
+                        Log.e("AssistantViewModel", "Gibberish or invalid JSON output from LLM: $fullResponse")
+                        llamaModel.clearContext()
+                        withContext(Dispatchers.Main) {
+                            _isGenerating.value = false
+                            _status.value = ModelStatus.Idle
+                            _streamingMessage.value = ""
+                            Toast.makeText(context, "Assistant is currently resetting context.", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             } catch (e: Throwable) {
@@ -569,7 +606,7 @@ fun MainScreen(
                         val content = knowledgeIndexer.readFile(fileName) ?: "File not found"
                         val injectedText = "I have read the file $fileName. Its content is:\n$content\nWhat would you like me to do next?"
                         val calendarHelper = CalendarHelper(context)
-                        viewModel.sendMessage(injectedText, calendarHelper.getTodaySchedule(), sensorManager.getEnvironmentContext(), settingsManager, ttsManager) {}
+                        viewModel.sendMessage(injectedText, calendarHelper.getTodaySchedule(), sensorManager.getEnvironmentContext(), settingsManager, ttsManager, context) {}
                     } else {
                         onAction(action)
                     }
@@ -1008,7 +1045,7 @@ fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsMana
             FloatingActionButton(
                 onClick = {
                     if (inputText.isNotBlank()) {
-                        viewModel.sendMessage(inputText, todaySchedule, sensorManager.getEnvironmentContext(), settingsManager, ttsManager, onAction)
+                        viewModel.sendMessage(inputText, todaySchedule, sensorManager.getEnvironmentContext(), settingsManager, ttsManager, context, onAction)
                         inputText = ""
                     }
                 }

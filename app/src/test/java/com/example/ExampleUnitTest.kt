@@ -80,4 +80,14 @@ class ExampleUnitTest {
           fail("JNI null check crashed with NullPointerException: ${e.message}")
       }
   }
+
+  @Test
+  fun testOfflineLlamaModel_clearContext_doesNotCrash() {
+      try {
+          val model = OfflineLlamaModel()
+          model.clearContext()
+      } catch (e: Throwable) {
+          fail("clearContext threw an unexpected exception: ${e.message}")
+      }
+  }
 }

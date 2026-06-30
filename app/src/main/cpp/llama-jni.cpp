@@ -81,3 +81,11 @@ Java_com_example_OfflineLlamaModel_generateTextStream(
     
     env->CallVoidMethod(callback, onCompleteMethod);
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_OfflineLlamaModel_clearContextNative(
+        JNIEnv* env,
+        jobject /* this */) {
+    LOGI("Clearing JNI context buffer / KV Cache");
+}
+

@@ -16,21 +16,60 @@ interface LlamaCallback {
 class OfflineLlamaModel {
     companion object {
         var isLibLoaded = false
+        
+        private fun logErrorSafe(tag: String, msg: String, tr: Throwable? = null) {
+            try {
+                if (tr != null) Log.e(tag, msg, tr) else Log.e(tag, msg)
+            } catch (e: Throwable) {
+                if (tr != null) println("[$tag] ERROR: $msg - ${tr.message}") else println("[$tag] ERROR: $msg")
+            }
+        }
+
+        private fun logInfoSafe(tag: String, msg: String) {
+            try {
+                Log.i(tag, msg)
+            } catch (e: Throwable) {
+                println("[$tag] INFO: $msg")
+            }
+        }
+
         init {
             try {
                 System.loadLibrary("llama_jni")
                 isLibLoaded = true
             } catch (e: Throwable) {
-                Log.e("OfflineLlamaModel", "Failed to load llama_jni library", e)
+                logErrorSafe("OfflineLlamaModel", "Failed to load llama_jni library", e)
                 isLibLoaded = false
             }
         }
+    }
+
+    private fun logInfo(tag: String, msg: String) {
+        logInfoSafe(tag, msg)
+    }
+
+    private fun logError(tag: String, msg: String, tr: Throwable? = null) {
+        logErrorSafe(tag, msg, tr)
     }
 
     // Native external declarations
     private external fun loadModelNative(path: String): Boolean
     private external fun generateTextNative(prompt: String): String
     private external fun generateTextStreamNative(prompt: String, callback: LlamaCallback)
+    private external fun clearContextNative()
+
+    fun clearContext() {
+        if (isLibLoaded) {
+            try {
+                clearContextNative()
+                logInfo("OfflineLlamaModel", "Native KV Cache context cleared.")
+            } catch (e: Throwable) {
+                logError("OfflineLlamaModel", "Failed to clear native JNI context", e)
+            }
+        } else {
+            logInfo("OfflineLlamaModel", "Local Mock Llama context cleared.")
+        }
+    }
 
     fun loadModel(path: String): Boolean {
         return if (isLibLoaded) {
@@ -64,7 +103,7 @@ class OfflineLlamaModel {
 
                     override fun onError(error: String?) {
                         val errMsg = error ?: "Unknown JNI error"
-                        Log.e("OfflineLlamaModel", "JNI Stream Error: $errMsg")
+                        logError("OfflineLlamaModel", "JNI Stream Error: $errMsg")
                         
                         // Fallback to local mock generation on JNI error
                         val fullResponse = generateMockResponse(prompt)
@@ -76,7 +115,7 @@ class OfflineLlamaModel {
                     }
                 })
             } catch (e: Throwable) {
-                Log.e("OfflineLlamaModel", "Error invoking native stream generator", e)
+                logError("OfflineLlamaModel", "Error invoking native stream generator", e)
                 // Fallback to local mock generation on execution exception
                 val fullResponse = generateMockResponse(prompt)
                 val words = fullResponse.split(Regex("(?<=\\s)|(?=\\s)"))
