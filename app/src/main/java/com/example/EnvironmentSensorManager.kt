@@ -8,6 +8,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.BatteryManager
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,7 +25,34 @@ class EnvironmentSensorManager(private val context: Context) : SensorEventListen
     private val _accelerometerData = MutableStateFlow(Triple(0f, 0f, 0f))
     val accelerometerData = _accelerometerData.asStateFlow()
 
+    private var isListening = false
+    private var job: Job? = null
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
     fun startListening() {
+        if (isListening) return
+        isListening = true
+        
+        job = scope.launch {
+            while (isActive) {
+                val batteryLevel = getBatteryLevel()
+                val isLowPower = batteryLevel != -1 && batteryLevel < 20
+                
+                registerListenersInternal()
+                delay(5000) // Gather sensor telemetry for 5 seconds
+                unregisterListenersInternal()
+                
+                val delayTime = if (isLowPower) {
+                    60 * 60 * 1000L // Reduce frequency to 60 minutes
+                } else {
+                    5000L // Standard 5-second interval
+                }
+                delay(delayTime)
+            }
+        }
+    }
+
+    private fun registerListenersInternal() {
         lightSensor?.let {
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
         }
@@ -33,8 +61,14 @@ class EnvironmentSensorManager(private val context: Context) : SensorEventListen
         }
     }
 
-    fun stopListening() {
+    private fun unregisterListenersInternal() {
         sensorManager.unregisterListener(this)
+    }
+
+    fun stopListening() {
+        isListening = false
+        job?.cancel()
+        unregisterListenersInternal()
     }
 
     fun getBatteryLevel(): Int {

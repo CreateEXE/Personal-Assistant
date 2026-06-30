@@ -61,6 +61,33 @@ sealed class ModelStatus {
     data class Error(val message: String) : ModelStatus()
 }
 
+fun extractResponseText(json: String): String {
+    val trimmed = json.trim()
+    if (!trimmed.startsWith("{")) {
+        return json
+    }
+    
+    // Pattern to find response_text
+    val responsePattern = "\"response_text\"\\s*:\\s*\"([^\"]*)"
+    val responseRegex = Regex(responsePattern)
+    val responseMatch = responseRegex.find(json)
+    if (responseMatch != null) {
+        val rawText = responseMatch.groupValues[1]
+        return rawText.replace("\\\"", "\"").replace("\\n", "\n")
+    }
+    
+    // Pattern to find thought_process
+    val thoughtPattern = "\"thought_process\"\\s*:\\s*\"([^\"]*)"
+    val thoughtRegex = Regex(thoughtPattern)
+    val thoughtMatch = thoughtRegex.find(json)
+    if (thoughtMatch != null) {
+        val thought = thoughtMatch.groupValues[1]
+        return "Thinking: ${thought.replace("\\\"", "\"").replace("\\n", "\n")}"
+    }
+    
+    return "Analyzing request..."
+}
+
 class AssistantViewModel(private val repository: com.example.data.ChatRepository) : ViewModel() {
     val messages: StateFlow<List<com.example.data.ChatMessageEntity>> = repository.allMessages.stateIn(
         scope = viewModelScope,
@@ -101,7 +128,24 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
             else -> "[SENTIMENT_TAG: CASUAL]"
         }
         
-        val prompt = "System: $personality\n$sentimentTag\nModify tone and thought_process based on sentiment tag.\n$calendarContext\n$environmentContext\n\nUser: $userText\nAssistant:"
+        val schemaFormat = """
+            You MUST respond using the following JSON schema format:
+            {
+              "thought_process": "Your internal chain-of-thought analysis goes here. Keep it concise.",
+              "execute_action": { "type": "action_type", "parameters": { "param_key": "param_value" } },
+              "response_text": "Your natural language response to the user."
+            }
+            Actions you can trigger:
+            - type: "add_appointment" with parameters: "title", "start_time_offset_mins", "duration_mins"
+            - type: "set_alarm" with parameters: "hour", "minute", "message"
+            - type: "control_hardware" with parameters: "action" (toggle_bluetooth, toggle_flashlight), "state" (on, off)
+            - type: "read_file" with parameters: "fileName"
+            
+            If no action is needed, set "execute_action" to null.
+            CRITICAL: Do NOT output confirmation of an action in "response_text" unless the action is confirmed successful by the backend.
+        """.trimIndent()
+        
+        val prompt = "System: $personality\n\n$schemaFormat\n\n$sentimentTag\nModify tone and thought_process based on sentiment tag.\n$calendarContext\n$environmentContext\n\nUser: $userText\nAssistant:"
         
         viewModelScope.launch {
             repository.insertMessage(userText, true)
@@ -109,7 +153,6 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
             _streamingMessage.value = ""
 
             try {
-                // First simulate Loading, then generating
                 withContext(Dispatchers.IO) {
                     _status.value = ModelStatus.Generating
                     var fullResponse = ""
@@ -125,16 +168,28 @@ class AssistantViewModel(private val repository: com.example.data.ChatRepository
                     }
 
                     if (llamaResponse != null) {
-                        repository.insertMessage(llamaResponse.response_text, false)
-                        ttsManager.speak(llamaResponse.response_text)
+                        val actionsToExecute = mutableListOf<LlamaAction>()
+                        llamaResponse.execute_action?.let { actionsToExecute.add(it) }
+                        llamaResponse.actions?.let { actionsToExecute.addAll(it) }
                         
-                        llamaResponse.actions.forEach { action ->
+                        // Execute actions silently in the background BEFORE the UI updates
+                        actionsToExecute.forEach { action ->
                             withContext(Dispatchers.Main) {
                                 onAction(action)
                             }
                         }
+
+                        // Save and speak actual response text
+                        repository.insertMessage(llamaResponse.response_text, false)
+                        ttsManager.speak(llamaResponse.response_text)
                     } else {
-                        repository.insertMessage("Error parsing JSON response: $fullResponse", false)
+                        val extractedText = extractResponseText(fullResponse)
+                        if (extractedText.isNotEmpty() && extractedText != "Analyzing request...") {
+                            repository.insertMessage(extractedText, false)
+                            ttsManager.speak(extractedText)
+                        } else {
+                            repository.insertMessage("Error parsing JSON response: $fullResponse", false)
+                        }
                     }
                 }
             } catch (e: Throwable) {
@@ -172,17 +227,20 @@ class MainActivity : ComponentActivity() {
         knowledgeIndexer = KnowledgeIndexer()
         hardwareController = HardwareController(this)
         
-        sensorManager.startListening()
+        val settingsManager = SettingsManager(this)
+        if (settingsManager.sensorPollingEnabled) {
+            sensorManager.startListening()
+        }
 
         checkPermissions()
         startProactiveEngine()
         
         setContent {
-            val settingsManager = remember { SettingsManager(this) }
+            val liveSettingsManager = remember { SettingsManager(this) }
             val calendarHelper = remember { CalendarHelper(this) }
             MyApplicationTheme {
                 MainScreen(
-                    settingsManager = settingsManager,
+                    settingsManager = liveSettingsManager,
                     sttManager = sttManager,
                     ttsManager = ttsManager,
                     sensorManager = sensorManager,
@@ -229,9 +287,9 @@ class MainActivity : ComponentActivity() {
     }
     
     private fun handleAddAppointment(action: LlamaAction) {
-        val title = action.title ?: "New Appointment"
-        val offset = action.start_time_offset_mins ?: 0
-        val duration = action.duration_mins ?: 60
+        val title = action.title ?: action.getParam("title") ?: "New Appointment"
+        val offset = action.start_time_offset_mins ?: action.getParam("start_time_offset_mins")?.toIntOrNull() ?: 0
+        val duration = action.duration_mins ?: action.getParam("duration_mins")?.toIntOrNull() ?: 60
         
         val startMillis = Calendar.getInstance().apply {
             add(Calendar.MINUTE, offset)
@@ -253,9 +311,9 @@ class MainActivity : ComponentActivity() {
         }
     }
     private fun handleSetAlarm(action: LlamaAction) {
-        val hour = action.hour ?: 8
-        val minute = action.minute ?: 0
-        val message = action.message ?: "Assistant Alarm"
+        val hour = action.hour ?: action.getParam("hour")?.toIntOrNull() ?: 8
+        val minute = action.minute ?: action.getParam("minute")?.toIntOrNull() ?: 0
+        val message = action.message ?: action.getParam("message") ?: "Assistant Alarm"
         
         val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
             putExtra(AlarmClock.EXTRA_HOUR, hour)
@@ -273,8 +331,8 @@ class MainActivity : ComponentActivity() {
     }
     
     private fun handleControlHardware(action: LlamaAction) {
-        val actionType = action.action ?: return
-        val state = action.state ?: "on"
+        val actionType = action.action ?: action.getParam("action") ?: return
+        val state = action.state ?: action.getParam("state") ?: "on"
         when (actionType) {
             "toggle_bluetooth" -> hardwareController.toggleBluetooth(state)
             "toggle_flashlight" -> hardwareController.toggleFlashlight(state)
@@ -424,7 +482,7 @@ fun MainScreen(
                 ViewMode.TODAY -> CalendarViewScreen(mode = ViewMode.TODAY)
                 ViewMode.WEEK -> CalendarViewScreen(mode = ViewMode.WEEK)
                 ViewMode.MONTH -> CalendarViewScreen(mode = ViewMode.MONTH)
-                ViewMode.SETTINGS -> SettingsScreen(settingsManager, sttManager, ttsManager)
+                ViewMode.SETTINGS -> SettingsScreen(settingsManager, sttManager, ttsManager, sensorManager)
                 else -> {}
             }
         }
@@ -433,7 +491,7 @@ fun MainScreen(
 }
 
 @Composable
-fun SettingsScreen(settingsManager: SettingsManager, sttManager: SpeechToTextManager, ttsManager: TextToSpeechManager) {
+fun SettingsScreen(settingsManager: SettingsManager, sttManager: SpeechToTextManager, ttsManager: TextToSpeechManager, sensorManager: EnvironmentSensorManager) {
     var name by remember { mutableStateOf(settingsManager.assistantName) }
     var personality by remember { mutableStateOf(settingsManager.personality) }
     var modelPath by remember { mutableStateOf(settingsManager.modelPath) }
@@ -523,6 +581,80 @@ fun SettingsScreen(settingsManager: SettingsManager, sttManager: SpeechToTextMan
                 Spacer(modifier = Modifier.height(8.dp))
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) 
             }
+        }
+        
+        item { Spacer(modifier = Modifier.height(32.dp)) }
+
+        item {
+            Text("Autonomous Systems", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        }
+        item { Spacer(modifier = Modifier.height(16.dp)) }
+
+        // Sensor Polling Toggle
+        item {
+            var sensorPolling by remember { mutableStateOf(settingsManager.sensorPollingEnabled) }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Sensor Polling", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    Text("Enable background environmental sensor updates", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = sensorPolling,
+                    onCheckedChange = { 
+                        sensorPolling = it
+                        settingsManager.sensorPollingEnabled = it
+                        if (it) {
+                            sensorManager.startListening()
+                        } else {
+                            sensorManager.stopListening()
+                        }
+                    }
+                )
+            }
+        }
+        item { Spacer(modifier = Modifier.height(16.dp)) }
+
+        // Low-Power Mode Toggle
+        item {
+            var lowPower by remember { mutableStateOf(settingsManager.lowPowerModeEnabled) }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Low-Power Mode", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    Text("Throttle sensor polling rate to 60 minutes if battery < 20%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = lowPower,
+                    onCheckedChange = { 
+                        lowPower = it
+                        settingsManager.lowPowerModeEnabled = it
+                    }
+                )
+            }
+        }
+        item { Spacer(modifier = Modifier.height(16.dp)) }
+
+        // File Indexing Path
+        item {
+            var filePath by remember { mutableStateOf(settingsManager.fileIndexingPath) }
+            OutlinedTextField(
+                value = filePath,
+                onValueChange = { 
+                    filePath = it
+                    settingsManager.fileIndexingPath = it
+                },
+                label = { Text("File Indexing Search Path") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                supportingText = { Text("Absolute directory path for local companion knowledge files.") }
+            )
         }
         
         item { Spacer(modifier = Modifier.height(32.dp)) }
@@ -628,7 +760,10 @@ fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsMana
                 }
             } else if (status == ModelStatus.Generating && streamingMessage.isNotEmpty()) {
                 item {
-                    ChatBubble(message = com.example.data.ChatMessageEntity(text = streamingMessage, isUser = false))
+                    val parsedStreaming = remember(streamingMessage) { extractResponseText(streamingMessage) }
+                    if (parsedStreaming.isNotEmpty()) {
+                        ChatBubble(message = com.example.data.ChatMessageEntity(text = parsedStreaming, isUser = false))
+                    }
                 }
             }
         }
@@ -804,11 +939,19 @@ fun ChatBubble(message: com.example.data.ChatMessageEntity) {
             color = backgroundColor,
             modifier = Modifier.padding(horizontal = 8.dp)
         ) {
-            Text(
-                text = message.text,
-                color = textColor,
-                modifier = Modifier.padding(12.dp)
-            )
+            if (message.isUser) {
+                Text(
+                    text = message.text,
+                    color = textColor,
+                    modifier = Modifier.padding(12.dp)
+                )
+            } else {
+                com.example.ui.MarkdownText(
+                    text = message.text,
+                    color = textColor,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
         }
     }
 }
