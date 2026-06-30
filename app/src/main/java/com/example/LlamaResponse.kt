@@ -6,7 +6,7 @@ import com.squareup.moshi.JsonClass
 data class LlamaResponse(
     val thought_process: String? = null,
     val execute_action: LlamaAction? = null,
-    val response_text: String,
+    val response_text: String? = null,
     val actions: List<LlamaAction>? = null
 )
 

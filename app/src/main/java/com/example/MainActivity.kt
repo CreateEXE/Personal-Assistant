@@ -64,10 +64,13 @@ sealed class ModelStatus {
     data class Error(val message: String) : ModelStatus()
 }
 
-fun extractResponseText(json: String): String {
+fun extractResponseText(json: String?): String {
+    if (json.isNullOrBlank()) {
+        return ""
+    }
     val trimmed = json.trim()
     if (!trimmed.startsWith("{")) {
-        return json
+        return trimmed
     }
     
     // Pattern to find response_text
@@ -215,12 +218,18 @@ class AssistantViewModel(
                     _status.value = ModelStatus.Generating
                     var fullResponse = ""
                     llamaModel.generateTextStreaming(prompt).collect { token ->
-                        fullResponse += token
-                        _streamingMessage.value = fullResponse
+                        if (token != null) {
+                            fullResponse += token
+                            _streamingMessage.value = fullResponse
+                        }
                     }
                     
                     val llamaResponse = try {
-                        jsonAdapter.fromJson(fullResponse)
+                        if (fullResponse.isNotEmpty()) {
+                            jsonAdapter.fromJson(fullResponse)
+                        } else {
+                            null
+                        }
                     } catch (e: Throwable) {
                         null
                     }
@@ -228,7 +237,9 @@ class AssistantViewModel(
                     if (llamaResponse != null) {
                         val actionsToExecute = mutableListOf<LlamaAction>()
                         llamaResponse.execute_action?.let { actionsToExecute.add(it) }
-                        llamaResponse.actions?.let { actionsToExecute.addAll(it) }
+                        llamaResponse.actions?.let { actions ->
+                            actions.filterNotNull().let { actionsToExecute.addAll(it) }
+                        }
                         
                         // Execute actions silently in the background BEFORE the UI updates
                         actionsToExecute.forEach { action ->
@@ -244,27 +255,29 @@ class AssistantViewModel(
                             }
                         }
 
+                        val responseText = llamaResponse.response_text.takeIf { !it.isNullOrBlank() } 
+                            ?: "I processed your request, but did not generate any text response."
+
                         // Save and speak actual response text
-                        repository.insertMessage(llamaResponse.response_text, false)
+                        repository.insertMessage(responseText, false)
                         
                         // Add response to history buffer and prune
-                        historyBuffer.addLast(com.example.data.ChatMessageEntity(text = llamaResponse.response_text, isUser = false))
+                        historyBuffer.addLast(com.example.data.ChatMessageEntity(text = responseText, isUser = false))
                         pruneHistory()
 
-                        ttsManager.speak(llamaResponse.response_text)
+                        ttsManager.speak(responseText)
                     } else {
                         val extractedText = extractResponseText(fullResponse)
-                        if (extractedText.isNotEmpty() && extractedText != "Analyzing request...") {
-                            repository.insertMessage(extractedText, false)
-                            
-                            // Add response to history buffer and prune
-                            historyBuffer.addLast(com.example.data.ChatMessageEntity(text = extractedText, isUser = false))
-                            pruneHistory()
+                        val safeText = extractedText.takeIf { !it.isNullOrBlank() && it != "Analyzing request..." } 
+                            ?: "Error parsing JSON response: ${fullResponse.takeIf { it.isNotEmpty() } ?: "Empty model response"}"
+                        
+                        repository.insertMessage(safeText, false)
+                        
+                        // Add response to history buffer and prune
+                        historyBuffer.addLast(com.example.data.ChatMessageEntity(text = safeText, isUser = false))
+                        pruneHistory()
 
-                            ttsManager.speak(extractedText)
-                        } else {
-                            repository.insertMessage("Error parsing JSON response: $fullResponse", false)
-                        }
+                        ttsManager.speak(safeText)
                     }
                 }
             } catch (e: Throwable) {

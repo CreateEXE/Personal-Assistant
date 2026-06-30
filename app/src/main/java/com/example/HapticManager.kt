@@ -19,12 +19,16 @@ class HapticManager(private val context: Context) {
      * Trigger a short, light tap haptic feedback (e.g., Send button click).
      */
     fun triggerLightTap() {
-        vibrator?.let {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                it.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
-            } else {
-                it.vibrate(VibrationEffect.createOneShot(30, VibrationEffect.DEFAULT_AMPLITUDE))
+        try {
+            vibrator?.let {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    it.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
+                } else {
+                    it.vibrate(VibrationEffect.createOneShot(30, VibrationEffect.DEFAULT_AMPLITUDE))
+                }
             }
+        } catch (e: Throwable) {
+            // Defensively catch and ignore to avoid crashes on unsupported/virtual hardware
         }
     }
 
@@ -32,14 +36,18 @@ class HapticManager(private val context: Context) {
      * Trigger a success double-pulse haptic feedback (e.g., task execution success).
      */
     fun triggerSuccess() {
-        vibrator?.let {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                it.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_DOUBLE_CLICK))
-            } else {
-                val timings = longArrayOf(0, 50, 100, 50)
-                val amplitudes = intArrayOf(0, VibrationEffect.DEFAULT_AMPLITUDE, 0, VibrationEffect.DEFAULT_AMPLITUDE)
-                it.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+        try {
+            vibrator?.let {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    it.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_DOUBLE_CLICK))
+                } else {
+                    val timings = longArrayOf(0, 50, 100, 50)
+                    val amplitudes = intArrayOf(0, VibrationEffect.DEFAULT_AMPLITUDE, 0, VibrationEffect.DEFAULT_AMPLITUDE)
+                    it.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                }
             }
+        } catch (e: Throwable) {
+            // Defensively catch and ignore to avoid crashes on unsupported/virtual hardware
         }
     }
 
@@ -47,8 +55,12 @@ class HapticManager(private val context: Context) {
      * Trigger a heavy, distinctive buzz haptic feedback (e.g., error state).
      */
     fun triggerError() {
-        vibrator?.let {
-            it.vibrate(VibrationEffect.createOneShot(300, 220)) // 300ms at higher amplitude
+        try {
+            vibrator?.let {
+                it.vibrate(VibrationEffect.createOneShot(300, 220)) // 300ms at higher amplitude
+            }
+        } catch (e: Throwable) {
+            // Defensively catch and ignore to avoid crashes on unsupported/virtual hardware
         }
     }
 }
