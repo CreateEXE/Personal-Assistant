@@ -23,8 +23,11 @@ class HapticManager(private val context: Context) {
             vibrator?.let {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     it.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
-                } else {
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     it.vibrate(VibrationEffect.createOneShot(30, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    it.vibrate(30)
                 }
             }
         } catch (e: Throwable) {
@@ -40,10 +43,13 @@ class HapticManager(private val context: Context) {
             vibrator?.let {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     it.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_DOUBLE_CLICK))
-                } else {
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     val timings = longArrayOf(0, 50, 100, 50)
                     val amplitudes = intArrayOf(0, VibrationEffect.DEFAULT_AMPLITUDE, 0, VibrationEffect.DEFAULT_AMPLITUDE)
                     it.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    it.vibrate(longArrayOf(0, 50, 100, 50), -1)
                 }
             }
         } catch (e: Throwable) {
@@ -57,7 +63,12 @@ class HapticManager(private val context: Context) {
     fun triggerError() {
         try {
             vibrator?.let {
-                it.vibrate(VibrationEffect.createOneShot(300, 220)) // 300ms at higher amplitude
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    it.vibrate(VibrationEffect.createOneShot(300, 220)) // 300ms at higher amplitude
+                } else {
+                    @Suppress("DEPRECATION")
+                    it.vibrate(300)
+                }
             }
         } catch (e: Throwable) {
             // Defensively catch and ignore to avoid crashes on unsupported/virtual hardware

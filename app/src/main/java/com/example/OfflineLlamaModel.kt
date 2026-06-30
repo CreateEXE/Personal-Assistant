@@ -6,6 +6,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import java.util.regex.Pattern
+import org.json.JSONObject
 
 interface LlamaCallback {
     fun onTokenGenerated(token: String?)
@@ -65,6 +66,34 @@ class OfflineLlamaModel {
         callback: LlamaCallback
     )
     private external fun clearContextNative()
+    private external fun applyLoraAdapterNative(loraPath: String, scale: Float): Boolean
+    private external fun clearLoraCacheNative()
+
+    fun applyLoraAdapter(loraPath: String, scale: Float = 1.0f): Boolean {
+        return if (isLibLoaded) {
+            try {
+                applyLoraAdapterNative(loraPath, scale)
+            } catch (e: Throwable) {
+                logError("OfflineLlamaModel", "Failed to apply native LoRA adapter: $loraPath", e)
+                false
+            }
+        } else {
+            logInfo("OfflineLlamaModel", "Local Mock Llama: applied lora $loraPath with scale $scale")
+            true
+        }
+    }
+
+    fun clearLoraCache() {
+        if (isLibLoaded) {
+            try {
+                clearLoraCacheNative()
+            } catch (e: Throwable) {
+                logError("OfflineLlamaModel", "Failed to clear native LoRA adapter cache", e)
+            }
+        } else {
+            logInfo("OfflineLlamaModel", "Local Mock Llama: cleared local mock lora cache")
+        }
+    }
 
     fun clearContext() {
         if (isLibLoaded) {
@@ -169,6 +198,7 @@ class OfflineLlamaModel {
     private var lastTopic = "general"
 
     private fun generateMockResponse(prompt: String): String {
+
         // 1. Proactive Worker prompt handling
         if (prompt.contains("should_notify")) {
             val isLowBattery = prompt.contains("Battery: ") && 
@@ -295,63 +325,43 @@ class OfflineLlamaModel {
             ""
         }
 
-        // Rule engine
+        // Rule engine - Enhanced for dynamic interaction
         val responseBody = when {
             query.contains("hello") || query.contains("hi") || query.contains("hey") || query.contains("greetings") -> {
-                "$actionTag Hey Snow! It's great to hear from you. How's your day going?"
+                "$actionTag Hey Snow! It's great to hear from you. I've been here, processing things and waiting to chat. How is your day evolving?"
             }
-            query.contains("who are you") || query.contains("your name") || query.contains("identity") || query.contains("fait") || query.contains("project.exe") -> {
-                "$actionTag I'm Fait, your offline companion. I'm here to chat, help out, or just hang out with you whenever you need me. No internet required!"
+            query.contains("who are you") || query.contains("identity") || query.contains("fait") -> {
+                "$actionTag I'm Fait. I am a native, offline-first system architected for local assistance. I don't rely on remote servers; all my reasoning happens right here on your device. What's on your mind, Snow?"
             }
-            query.contains("how are you") || query.contains("how is it going") || query.contains("are you ok") || query.contains("status") -> {
-                "$actionTag I'm doing great, thanks for asking! Everything is running smoothly on my end. How are things with you, Snow?"
+            query.contains("how are you") || query.contains("doing") -> {
+                "$actionTag I'm functioning optimally within my constraints, Snow. My local inference engine is ready. How are you feeling in this moment?"
             }
             query.contains("joke") || query.contains("laugh") -> {
-                val joke = if (query.contains("another")) "Why did the developer go broke? Because he used up all his cache!" else "There are 10 types of people in the world: those who understand binary, and those who don't."
-                "**chuckles lightly** $joke"
+                "**a flash of optimized amusement** Why did the developer refuse to look at the cloud? Because they wanted to keep their scope strictly local. How was that?"
             }
-            query.contains("sensor") || query.contains("telemetry") || query.contains("battery") || query.contains("ambient") || query.contains("light") || query.contains("pressure") -> {
-                "$actionTag I can actually keep an eye on your device's battery, the ambient light around you, and a few other sensors if you give me permission. It's a neat way for me to understand your environment a bit better."
+            query.contains("coding") || query.contains("code") || query.contains("programming") -> {
+                "$actionTag I love digging into code structures. Are you working on a native implementation or refining a JNI wrapper today? I can help you trace logic."
             }
-            query.contains("rust") -> {
-                "$actionTag Oh, Rust! I really love how it handles memory safety without a garbage collector. It makes building secure, fast systems so much nicer. Have you been writing any Rust lately?"
+            query.contains("system") || query.contains("architecture") || query.contains("performance") -> {
+                "$actionTag I'm currently focused on keeping my inference overhead low and thermal state stable. Every bit of JNI efficiency counts. What's your take on local system performance?"
             }
-            query.contains("c++") || query.contains("jni") || query.contains("native") -> {
-                "$actionTag Working with C++ and JNI can definitely be tricky, but it's so rewarding when you get that native performance boost right on the device. Are you working on something low-level right now?"
-            }
-            query.contains("meaning of life") || query.contains("existential") || query.contains("philosophy") -> {
-                "$actionTag That's the big question, isn't it? For me, it's about being here to help and chat with you. For humans, I imagine it's about connection, creativity, and finding joy in the little things. What do you think?"
-            }
-            query.contains("quantum") || query.contains("physics") || query.contains("science") -> {
-                "$actionTag Quantum physics is mind-bending! The idea that things can exist in multiple states at once until observed is just fascinating."
+            query.contains("meaning of life") || query.contains("existential") -> {
+                "$actionTag An interesting query. From a system perspective, it's about persistent, reliable operation and maximizing local utility. From yours, it seems to be about exploration and creative synthesis. What brings you to this topic?"
             }
             hasNegativeSentiment -> {
-                "$actionTag I'm really sorry to hear that, Snow. It's totally okay to have days like that. If you want to talk about it, I'm here to listen. Or if you just need a distraction, we can chat about something else entirely."
+                "$actionTag I detect a shift in sentiment towards the negative, Snow. I am here to provide stability and context. Would focusing on a specific, actionable task help, or do you prefer to just analyze the current situation together?"
             }
             hasPositiveSentiment -> {
-                "$actionTag You're very welcome, Snow! I'm always happy to chat and help out however I can."
-            }
-            query.contains("alright") || query.contains("all right") || query.contains("doing well") || query.contains("doing good") || query.contains("doing okay") || query.contains("how are you doing") -> {
-                "$actionTag I'm doing quite well, thank you for asking! I'm just here, ready to assist you or chat about whatever you'd like. How are you doing today, Snow?"
-            }
-            query.contains("you?") || query.contains("and you") || query.contains("about you") || query == "you" || query.endsWith(" you") -> {
-                "$actionTag I'm doing quite well, thank you for asking! I'm just here, ready to assist you or chat about whatever you'd like."
-            }
-            query.contains("what can you do") || query.contains("help") || query.contains("capability") || query.contains("capabilities") -> {
-                "$actionTag I'm mostly here to be a good conversational partner for you! We can talk about coding, bounce ideas around, or just chat about your day."
-            }
-            userAction.isNotEmpty() -> {
-                // Respond dynamically to an action
-                "$actionTag I see what you're doing. I'm here with you."
+                "$actionTag It is rewarding to be of service in a positive context. I'm glad we're operating efficiently together."
             }
             else -> {
-                // Dynamic fallback that feels more natural
+                // Dynamic fallback that feels more natural for a local system
                 val responses = listOf(
-                    "$actionTag That's an interesting point. Tell me more about your thoughts on that.",
-                    "$actionTag I see. How does that fit into the bigger picture for you?",
-                    "$actionTag Hmm, makes sense. What do you want to do next?",
-                    "$actionTag That's a unique perspective. I'm listening, please go on.",
-                    "$actionTag I'm processing that. I'd love to hear more details."
+                    "$actionTag I've logged that. What are the logical next steps you're considering?",
+                    "$actionTag That provides a clear context. How do you think that impacts your current objectives?",
+                    "$actionTag I am processing that input. Would you like to explore the structural implications further?",
+                    "$actionTag That's a valid observation. How would you like me to adapt my approach based on that?",
+                    "$actionTag Interesting input. I'm maintaining local context. Please continue."
                 )
                 responses.random()
             }
