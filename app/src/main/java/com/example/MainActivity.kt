@@ -166,12 +166,14 @@ class MainActivity : ComponentActivity() {
     }
     
     private fun checkPermissions() {
-        val perms = arrayOf(
+        val perms = mutableListOf(
             Manifest.permission.READ_CALENDAR,
             Manifest.permission.WRITE_CALENDAR,
-            Manifest.permission.POST_NOTIFICATIONS,
             Manifest.permission.RECORD_AUDIO
         )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
         
         val missingPerms = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
