@@ -61,6 +61,7 @@ class TextToSpeechManager(context: Context) : TextToSpeech.OnInitListener {
                         .build()
                 )
                 .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener { }
                 .build()
             audioManager.requestAudioFocus(audioFocusRequest!!)
         } else {

@@ -45,6 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -53,14 +54,25 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-data class ChatMessage(val text: String, val isUser: Boolean)
+sealed class ModelStatus {
+    object Idle : ModelStatus()
+    object Loading : ModelStatus()
+    object Generating : ModelStatus()
+    data class Error(val message: String) : ModelStatus()
+}
 
-class AssistantViewModel : ViewModel() {
-    private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
-    val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
+class AssistantViewModel(private val repository: com.example.data.ChatRepository) : ViewModel() {
+    val messages: StateFlow<List<com.example.data.ChatMessageEntity>> = repository.allMessages.stateIn(
+        scope = viewModelScope,
+        started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
     
-    private val _isLoading = MutableStateFlow(false)
-    val isLoading = _isLoading.asStateFlow()
+    private val _status = MutableStateFlow<ModelStatus>(ModelStatus.Idle)
+    val status = _status.asStateFlow()
+
+    private val _streamingMessage = MutableStateFlow("")
+    val streamingMessage = _streamingMessage.asStateFlow()
 
     private val llamaModel = OfflineLlamaModel()
     
@@ -74,43 +86,63 @@ class AssistantViewModel : ViewModel() {
         try {
             llamaModel.loadModel(modelPath)
         } catch (e: UnsatisfiedLinkError) {
-            _messages.value = _messages.value + ChatMessage("Error: Could not load JNI bridge.", false)
+            _status.value = ModelStatus.Error("Could not load JNI bridge.")
         }
     }
 
-    fun sendMessage(userText: String, calendarContext: String, settingsManager: SettingsManager, ttsManager: TextToSpeechManager, onAction: (LlamaAction) -> Unit) {
+    fun sendMessage(userText: String, calendarContext: String, environmentContext: String, settingsManager: SettingsManager, ttsManager: TextToSpeechManager, onAction: (LlamaAction) -> Unit) {
         val personality = settingsManager.personality
-        val prompt = "System: $personality\n$calendarContext\n\nUser: $userText\nAssistant:"
-        _messages.value = _messages.value + ChatMessage(userText, true)
-        _isLoading.value = true
-
+        
+        // Sentiment Mapping
+        val lowerText = userText.lowercase()
+        val sentimentTag = when {
+            lowerText.contains("stress") || lowerText.contains("anxious") || lowerText.contains("hard") -> "[SENTIMENT_TAG: STRESSED]"
+            lowerText.contains("work") || lowerText.contains("done") || lowerText.contains("focus") -> "[SENTIMENT_TAG: PRODUCTIVE]"
+            else -> "[SENTIMENT_TAG: CASUAL]"
+        }
+        
+        val prompt = "System: $personality\n$sentimentTag\nModify tone and thought_process based on sentiment tag.\n$calendarContext\n$environmentContext\n\nUser: $userText\nAssistant:"
+        
         viewModelScope.launch {
-            try {
-                val responseJson = withContext(Dispatchers.IO) {
-                    llamaModel.generateText(prompt)
-                }
-                
-                val llamaResponse = try {
-                    jsonAdapter.fromJson(responseJson)
-                } catch (e: Throwable) {
-                    null
-                }
+            repository.insertMessage(userText, true)
+            _status.value = ModelStatus.Loading
+            _streamingMessage.value = ""
 
-                if (llamaResponse != null) {
-                    _messages.value = _messages.value + ChatMessage(llamaResponse.response_text, false)
-                    ttsManager.speak(llamaResponse.response_text)
-                    
-                    llamaResponse.actions.forEach { action ->
-                        onAction(action)
+            try {
+                // First simulate Loading, then generating
+                withContext(Dispatchers.IO) {
+                    _status.value = ModelStatus.Generating
+                    var fullResponse = ""
+                    llamaModel.generateTextStreaming(prompt).collect { token ->
+                        fullResponse += token
+                        _streamingMessage.value = fullResponse
                     }
-                } else {
-                    _messages.value = _messages.value + ChatMessage("Error parsing JSON response: $responseJson", false)
+                    
+                    val llamaResponse = try {
+                        jsonAdapter.fromJson(fullResponse)
+                    } catch (e: Throwable) {
+                        null
+                    }
+
+                    if (llamaResponse != null) {
+                        repository.insertMessage(llamaResponse.response_text, false)
+                        ttsManager.speak(llamaResponse.response_text)
+                        
+                        llamaResponse.actions.forEach { action ->
+                            withContext(Dispatchers.Main) {
+                                onAction(action)
+                            }
+                        }
+                    } else {
+                        repository.insertMessage("Error parsing JSON response: $fullResponse", false)
+                    }
                 }
-                
             } catch (e: Throwable) {
-                _messages.value = _messages.value + ChatMessage("Error during generation: ${e.message}", false)
+                _status.value = ModelStatus.Error(e.message ?: "Unknown error")
+                repository.insertMessage("Error during generation: ${e.message}", false)
             } finally {
-                _isLoading.value = false
+                _streamingMessage.value = ""
+                _status.value = ModelStatus.Idle
             }
         }
     }
@@ -120,6 +152,9 @@ class MainActivity : ComponentActivity() {
     
     private lateinit var sttManager: SpeechToTextManager
     private lateinit var ttsManager: TextToSpeechManager
+    private lateinit var sensorManager: EnvironmentSensorManager
+    private lateinit var knowledgeIndexer: KnowledgeIndexer
+    private lateinit var hardwareController: HardwareController
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -133,21 +168,30 @@ class MainActivity : ComponentActivity() {
         
         sttManager = SpeechToTextManager(this)
         ttsManager = TextToSpeechManager(this)
+        sensorManager = EnvironmentSensorManager(this)
+        knowledgeIndexer = KnowledgeIndexer()
+        hardwareController = HardwareController(this)
+        
+        sensorManager.startListening()
 
         checkPermissions()
         startProactiveEngine()
         
         setContent {
             val settingsManager = remember { SettingsManager(this) }
+            val calendarHelper = remember { CalendarHelper(this) }
             MyApplicationTheme {
                 MainScreen(
                     settingsManager = settingsManager,
                     sttManager = sttManager,
                     ttsManager = ttsManager,
+                    sensorManager = sensorManager,
+                    knowledgeIndexer = knowledgeIndexer,
                     onAction = { action ->
                         when (action.type) {
                             "add_appointment" -> handleAddAppointment(action)
                             "set_alarm" -> handleSetAlarm(action)
+                            "control_hardware" -> handleControlHardware(action)
                         }
                     }
                 )
@@ -227,10 +271,21 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "No alarm app found", Toast.LENGTH_SHORT).show()
         }
     }
+    
+    private fun handleControlHardware(action: LlamaAction) {
+        val actionType = action.action ?: return
+        val state = action.state ?: "on"
+        when (actionType) {
+            "toggle_bluetooth" -> hardwareController.toggleBluetooth(state)
+            "toggle_flashlight" -> hardwareController.toggleFlashlight(state)
+            "take_photo" -> hardwareController.takePhoto()
+            else -> Toast.makeText(this, "Unknown hardware action: $actionType", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     override fun onDestroy() {
         super.onDestroy()
-        
+        sensorManager.stopListening()
         sttManager.destroy()
         ttsManager.shutdown()
     }
@@ -243,12 +298,18 @@ enum class ViewMode {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
-    viewModel: AssistantViewModel = androidx.lifecycle.viewmodel.compose.viewModel(),
     settingsManager: SettingsManager,
     sttManager: SpeechToTextManager,
     ttsManager: TextToSpeechManager,
+    sensorManager: EnvironmentSensorManager,
+    knowledgeIndexer: KnowledgeIndexer,
     onAction: (LlamaAction) -> Unit
 ) {
+    val context = LocalContext.current
+    val myApplication = context.applicationContext as MyApplication
+    val viewModel: AssistantViewModel = androidx.lifecycle.viewmodel.compose.viewModel(
+        factory = AssistantViewModelFactory(myApplication.chatRepository)
+    )
     var currentView by remember { mutableStateOf(ViewMode.SPLASH) }
     
     LaunchedEffect(Unit) {
@@ -282,8 +343,30 @@ fun MainScreen(
     } else {
         Scaffold(
             topBar = {
+                val status by viewModel.status.collectAsState()
+                val (statusText, statusColor) = when (status) {
+                    is ModelStatus.Idle -> "Idle" to MaterialTheme.colorScheme.onSurfaceVariant
+                    is ModelStatus.Loading -> "Loading" to MaterialTheme.colorScheme.primary
+                    is ModelStatus.Generating -> "Generating" to MaterialTheme.colorScheme.secondary
+                    is ModelStatus.Error -> "Error" to MaterialTheme.colorScheme.error
+                }
+                
                 TopAppBar(
                     title = { Text(settingsManager.assistantName) },
+                    actions = {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = statusColor.copy(alpha = 0.1f),
+                            modifier = Modifier.padding(end = 16.dp)
+                        ) {
+                            Text(
+                                text = statusText,
+                                color = statusColor,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.primaryContainer,
                         titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -327,7 +410,17 @@ fun MainScreen(
     ) { innerPadding ->
         Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             when (currentView) {
-                ViewMode.ASSISTANT -> AssistantScreen(viewModel, settingsManager, sttManager, ttsManager, onAction)
+                ViewMode.ASSISTANT -> AssistantScreen(viewModel, settingsManager, sttManager, ttsManager, sensorManager, knowledgeIndexer) { action ->
+                    if (action.type == "read_file") {
+                        val fileName = action.fileName ?: return@AssistantScreen
+                        val content = knowledgeIndexer.readFile(fileName) ?: "File not found"
+                        val injectedText = "I have read the file $fileName. Its content is:\n$content\nWhat would you like me to do next?"
+                        val calendarHelper = CalendarHelper(context)
+                        viewModel.sendMessage(injectedText, calendarHelper.getTodaySchedule(), sensorManager.getEnvironmentContext(), settingsManager, ttsManager) {}
+                    } else {
+                        onAction(action)
+                    }
+                }
                 ViewMode.TODAY -> CalendarViewScreen(mode = ViewMode.TODAY)
                 ViewMode.WEEK -> CalendarViewScreen(mode = ViewMode.WEEK)
                 ViewMode.MONTH -> CalendarViewScreen(mode = ViewMode.MONTH)
@@ -476,15 +569,19 @@ fun SettingsScreen(settingsManager: SettingsManager, sttManager: SpeechToTextMan
 }
 
 @Composable
-fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsManager, sttManager: SpeechToTextManager, ttsManager: TextToSpeechManager, onAction: (LlamaAction) -> Unit) {
+fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsManager, sttManager: SpeechToTextManager, ttsManager: TextToSpeechManager, sensorManager: EnvironmentSensorManager, knowledgeIndexer: KnowledgeIndexer, onAction: (LlamaAction) -> Unit) {
     val context = LocalContext.current
     val calendarHelper = remember { CalendarHelper(context) }
     var todaySchedule by remember { mutableStateOf("") }
     
     val messages by viewModel.messages.collectAsState()
-    val isLoading by viewModel.isLoading.collectAsState()
+    val status by viewModel.status.collectAsState()
+    val streamingMessage by viewModel.streamingMessage.collectAsState()
     val isListening by sttManager.isListening.collectAsState()
     val spokenText by sttManager.spokenText.collectAsState()
+    
+    val ambientLight by sensorManager.ambientLight.collectAsState()
+    val accelerometer by sensorManager.accelerometerData.collectAsState()
     
     var inputText by remember { mutableStateOf("") }
 
@@ -525,9 +622,13 @@ fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsMana
             items(messages) { message ->
                 ChatBubble(message = message)
             }
-            if (isLoading) {
+            if (status == ModelStatus.Loading) {
                 item {
                     CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                }
+            } else if (status == ModelStatus.Generating && streamingMessage.isNotEmpty()) {
+                item {
+                    ChatBubble(message = com.example.data.ChatMessageEntity(text = streamingMessage, isUser = false))
                 }
             }
         }
@@ -560,7 +661,7 @@ fun AssistantScreen(viewModel: AssistantViewModel, settingsManager: SettingsMana
             FloatingActionButton(
                 onClick = {
                     if (inputText.isNotBlank()) {
-                        viewModel.sendMessage(inputText, todaySchedule, settingsManager, ttsManager, onAction)
+                        viewModel.sendMessage(inputText, todaySchedule, sensorManager.getEnvironmentContext(), settingsManager, ttsManager, onAction)
                         inputText = ""
                     }
                 }
@@ -690,7 +791,7 @@ fun ReminderDialog(event: CalendarEvent, onDismiss: () -> Unit, onSchedule: (Int
 }
 
 @Composable
-fun ChatBubble(message: ChatMessage) {
+fun ChatBubble(message: com.example.data.ChatMessageEntity) {
     val backgroundColor = if (message.isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer
     val textColor = if (message.isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
 

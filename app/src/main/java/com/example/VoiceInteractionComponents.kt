@@ -20,22 +20,22 @@ class AssistantVoiceInteractionSessionService : VoiceInteractionSessionService()
     }
 }
 
-class AssistantVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
-    private lateinit var sttManager: SpeechToTextManager
+class AssistantVoiceInteractionSession(val ctx: Context) : VoiceInteractionSession(ctx) {
+    private var sttManager: SpeechToTextManager? = null
 
     override fun onCreate() {
         super.onCreate()
-        sttManager = SpeechToTextManager(context)
+        sttManager = SpeechToTextManager(ctx)
     }
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
-        sttManager.startListening()
+        sttManager?.startListening()
     }
 
     override fun onHide() {
         super.onHide()
-        sttManager.stopListening()
+        sttManager?.stopListening()
     }
 }
 

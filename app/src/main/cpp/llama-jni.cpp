@@ -42,3 +42,42 @@ Java_com_example_OfflineLlamaModel_generateText(
 
     return env->NewStringUTF(mock_json_response.c_str());
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_OfflineLlamaModel_generateTextStream(
+        JNIEnv* env,
+        jobject /* this */,
+        jstring prompt,
+        jobject callback) {
+    
+    const char *prompt_cstr = env->GetStringUTFChars(prompt, nullptr);
+    LOGI("Generating text stream for prompt: %s", prompt_cstr);
+    env->ReleaseStringUTFChars(prompt, prompt_cstr);
+    
+    jclass callbackClass = env->GetObjectClass(callback);
+    jmethodID onTokenGeneratedMethod = env->GetMethodID(callbackClass, "onTokenGenerated", "(Ljava/lang/String;)V");
+    jmethodID onCompleteMethod = env->GetMethodID(callbackClass, "onComplete", "()V");
+
+    // Stub mock response for streaming
+    std::string mock_json_response = R"({
+        "response_text": "Sure, I have scheduled your appointment.",
+        "actions": [
+            {
+                "type": "add_appointment",
+                "title": "Meeting with Assistant",
+                "start_time_offset_mins": 30,
+                "duration_mins": 60
+            }
+        ]
+    })";
+
+    // Simulate streaming by sending chunks
+    for (size_t i = 0; i < mock_json_response.length(); i += 10) {
+        std::string chunk = mock_json_response.substr(i, 10);
+        jstring jChunk = env->NewStringUTF(chunk.c_str());
+        env->CallVoidMethod(callback, onTokenGeneratedMethod, jChunk);
+        env->DeleteLocalRef(jChunk);
+    }
+    
+    env->CallVoidMethod(callback, onCompleteMethod);
+}
